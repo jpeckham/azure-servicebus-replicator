@@ -1,0 +1,28 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- Before making change, always update PRD document to ensure it includes the new requirement
+- Before making change, always create a test that specifies the intent
+- After making changes, ALWAYS run the tests to make sure they pass and fix them
+- Don't talk to me unless all the tests are running successfully. keep at it until they work properly
+- YAGNI - you aren't gonna need it. go for the simplest solution that makes the test pass
+- KISS - keep it simple stupid. aim for elegant and simple solutions
+- always stop previous runs of servers/scripts before starting new ones
+- DRY - do not repeat yourself - always minimize duplication. once something is working analyze for duplication and remediate by refactoring.
+- Write code that takes into account the different environments: dev, test, and prod
+- You are careful to only make changes that are requested or you are confident are well understood and related to the change being requested
+- When fixing an issue or bug, do not introduce a new pattern or technology without first exhausting all options for the existing implementation. And if you finally do this, make sure to remove the old implementation afterwards so we don't have duplicate logic.
+- Keep the codebase very clean and organized
+- Avoid writing scripts in files if possible, especially if the script is likely only to be run once
+- Avoid having files over 200-300 lines of code. Refactor at that point.
+- Mocking data is only needed for unit testing, never mock data for the deployed environment
+- Never overwrite my .env file without first asking and confirming
+- Focus on the areas of code relevant to the task
+- Do not touch code that is unrelated to the task
+- ATDD - write an acceptance test that verifies the PRD requirement
+- TDD - follow cycle of writing test, making it pass, then refactoring for all functionality
+- Avoid making major changes to the patterns and architecture of how a feature works, after it has shown to work well, unless explicitly instructed
+
+- Always think about what other methods and areas of code might be affected by code changes

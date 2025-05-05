@@ -16,6 +16,7 @@ public class ServiceBusConnectionConfig
 public class ConnectionStringConfig
 {
     public string Key { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
 }
 
 public class ReplicationConfig
