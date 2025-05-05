@@ -1,0 +1,6 @@
+@Exactitude.ServiceBus.Replicator.Api_HostAddress = http://localhost:5026
+
+GET {{Exactitude.ServiceBus.Replicator.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

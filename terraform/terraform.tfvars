@@ -1,0 +1,6 @@
+resource_group_name = "rg-servicebus-replication"
+source_location    = "centralus"
+target_location    = "eastus2"
+servicebus_sku     = "Standard"
+environment        = "Production"
+key_vault_sku      = "standard" 
