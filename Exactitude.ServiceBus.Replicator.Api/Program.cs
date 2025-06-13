@@ -1,5 +1,6 @@
 using Exactitude.ServiceBus.Replicator.Extensions;
 using Exactitude.ServiceBus.Replicator.Services;
+using Azure.Identity;
 
 public class Program
 {
@@ -7,19 +8,19 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        // Add Key Vault configuration (required for SAS connection strings)
+        var keyVaultUri = builder.Configuration["AzureKeyVault:VaultUri"] 
+            ?? throw new InvalidOperationException("Key Vault URI not configured");
+        
+        builder.Configuration.AddAzureKeyVault(
+            new Uri(keyVaultUri),
+            new DefaultAzureCredential());
+
         // Add services to the container.
         // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
         builder.Services.AddControllers();
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
-
-        // Add Azure Key Vault configuration only in non-test environments
-        if (!builder.Environment.IsEnvironment("Testing"))
-        {
-            builder.Configuration.AddAzureKeyVault(
-                new Uri(builder.Configuration["AzureKeyVault:VaultUri"]!),
-                new Azure.Identity.DefaultAzureCredential());
-        }
 
         // Add Service Bus Replicator
         builder.Services.AddServiceBusReplicator(builder.Configuration, builder.Environment);
@@ -32,8 +33,11 @@ public class Program
             app.UseSwagger();
             app.UseSwaggerUI();
         }
+        else
+        {
+            app.UseHttpsRedirection();
+        }
 
-        app.UseHttpsRedirection();
         app.UseAuthorization();
         app.MapControllers();
 
@@ -43,9 +47,4 @@ public class Program
 
         await app.RunAsync();
     }
-}
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
 }

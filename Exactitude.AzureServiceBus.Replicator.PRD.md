@@ -29,11 +29,23 @@ The solution requires two Azure Service Bus namespaces in different regions and 
   - SKU: Standard
   - Location: Central US
   - Role: Source for message replication
+  - SAS Authorization Rule:
+    - Name: RootManageSharedAccessKey
+    - Permissions: Listen, Send, Manage
+    - Created during namespace creation
+  - Local Authentication: Enabled
+  - Minimum TLS Version: 1.2
 
 - **Target Namespace (East US 2)**
   - SKU: Standard
   - Location: East US 2
   - Role: Target for message replication
+  - SAS Authorization Rule:
+    - Name: RootManageSharedAccessKey
+    - Permissions: Listen, Send, Manage
+    - Created during namespace creation
+  - Local Authentication: Enabled
+  - Minimum TLS Version: 1.2
 
 #### Azure Key Vault
 - SKU: Standard
@@ -41,19 +53,37 @@ The solution requires two Azure Service Bus namespaces in different regions and 
 - Stores Service Bus connection strings as secrets:
   - `AzureServiceBus-ConnectionString-Value`: Source namespace connection string
   - `AzureServiceBus-ConnectionString2-Value`: Target namespace connection string
+- Connection string format:
+  ```
+  Endpoint=sb://{namespace}.servicebus.windows.net/;SharedAccessKeyName={sas-rule-name};SharedAccessKey={primary-key}
+  ```
 
 #### Infrastructure as Code
 The infrastructure is managed using Terraform with the following components:
 - Resource Group creation
 - Service Bus namespace provisioning in both regions
+- SAS authorization rule creation for each namespace
 - Key Vault creation and configuration
 - Secret management for connection strings
 - Managed Identity integration
+- Connection string construction using:
+  - Namespace name
+  - SAS rule name
+  - Primary key from SAS rule
+- Test environment setup:
+  - Test topics in both namespaces
+  - Replication subscriptions with SQL filters
+  - Test message sender project
+  - Validation scripts
 
 ### Configuration Conventions
 - Appsettings pattern for indirection:
   ```json
   {
+    "AllowedHosts": "*",
+    "AzureKeyVault": {
+      "VaultUri": "https://my-keyvault-name.vault.azure.net/"
+    },
     "AzureServiceBus": {
       "ConnectionString": {
         "Key": "AzureServiceBus:ConnectionString:Value"
@@ -62,12 +92,17 @@ The infrastructure is managed using Terraform with the following components:
         "Key": "AzureServiceBus:ConnectionString2:Value"
       }
     },
-    "Replication": {
-      "SubscriptionName": "replicationapi",
-      "DefaultTTLMinutes": 10
+    "Logging": {
+      "LogLevel": {
+        "Default": "Debug",
+        "Microsoft.AspNetCore": "Debug",
+        "Microsoft.Hosting.Lifetime": "Debug",
+        "Azure": "Debug"
+      }
     },
-    "AzureKeyVault": {
-      "VaultUri": "https://my-keyvault-name.vault.azure.net/"
+    "Replication": {
+      "DefaultTTLMinutes": 10,
+      "SubscriptionName": "replicationapi"
     }
   }
   ```
@@ -78,11 +113,144 @@ Exactitude.ServiceBus.Replicator.sln
 ├── Exactitude.ServiceBus.Replicator         // Core class library (NuGet-targeted)
 ├── Exactitude.ServiceBus.Replicator.Api     // Sample ASP.NET Core Web API host
 ├── Exactitude.ServiceBus.Replicator.Tests   // MSTest + AutoFixture + Moq test library
-└── terraform/                               // Infrastructure as Code
+├── TestMessageSender                        // Test message sender application
+│   ├── Program.cs                          // Message sender implementation
+│   ├── TestMessageSender.csproj            // Project file
+│   └── appsettings.json                    // Key Vault configuration
+├── scripts                                 // Validation and setup scripts
+│   └── validate-environment.ps1            // Environment validation script
+└── terraform/                              // Infrastructure as Code
     ├── main.tf                             // Main Terraform configuration
     ├── variables.tf                        // Variable definitions
     └── terraform.tfvars                    // Default variable values
 ```
+
+### NuGet Library Usage
+
+#### Installation
+```bash
+dotnet add package Exactitude.ServiceBus.Replicator
+```
+
+#### Basic Usage
+```csharp
+// Program.cs
+using Exactitude.ServiceBus.Replicator;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddServiceBusReplication(builder.Configuration);
+
+var app = builder.Build();
+app.Run();
+```
+
+#### Configuration Options
+The library supports the following configuration options:
+
+1. **Connection Strings**
+   - Source namespace connection string via `AzureServiceBus:ConnectionString:Key`
+   - Target namespace connection string via `AzureServiceBus:ConnectionString2:Key`
+
+2. **Replication Settings**
+   - Subscription name via `Replication:SubscriptionName` (default: "replicationapi")
+   - Default TTL via `Replication:DefaultTTLMinutes` (default: 10)
+
+3. **Key Vault Integration**
+   - Vault URI via `AzureKeyVault:VaultUri`
+   - Uses DefaultAzureCredential for authentication
+
+### Sample Application
+
+#### Test Message Sender
+The sample application includes a test message sender that demonstrates how to:
+- Connect to Azure Service Bus using Key Vault secrets
+- Send messages with custom properties
+- Handle errors and retries
+
+To use the test message sender:
+1. Deploy the infrastructure using Terraform
+2. Navigate to the TestMessageSender directory
+3. Run the application:
+   ```bash
+   dotnet run
+   ```
+
+The sender will:
+- Connect to the source Service Bus namespace
+- Send a test message to the `test-topic`
+- Include custom properties for testing
+- Log success or failure
+
+#### Replication API
+The sample API demonstrates how to:
+- Host the replication service
+- Configure logging and error handling
+- Use dependency injection
+
+To run the API:
+1. Ensure infrastructure is deployed
+2. Navigate to the API project directory
+3. Run the application:
+   ```bash
+   dotnet run
+   ```
+
+The API will:
+- Start the replication service
+- Log startup and configuration details
+- Handle message replication automatically
+
+### Validation Procedures
+
+#### Infrastructure Validation
+1. **Terraform Deployment**
+   ```bash
+   cd terraform
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+2. **Resource Verification**
+   - Verify Service Bus namespaces are created in correct regions
+   - Confirm SAS rules are created with correct permissions
+   - Validate Key Vault secrets are properly stored
+   - Check local authentication is enabled on namespaces
+
+3. **Connection String Validation**
+   - Verify connection strings are properly formatted
+   - Test connectivity using Azure Portal
+   - Validate SAS token permissions
+
+#### Application Validation
+1. **Startup Validation**
+   - Verify application starts without errors
+   - Check Key Vault access is successful
+   - Confirm Service Bus connections are established
+
+2. **Replication Validation**
+   - Send test message to source topic
+   - Verify message appears in target topic
+   - Check replication metadata is added
+   - Validate TTL is properly set
+
+3. **Error Handling**
+   - Test connection failure scenarios
+   - Verify retry behavior
+   - Check error logging
+
+#### Performance Validation
+1. **Message Throughput**
+   - Test with various message sizes
+   - Verify concurrent processing
+   - Measure replication latency
+
+2. **Resource Usage**
+   - Monitor memory consumption
+   - Track CPU utilization
+   - Check network bandwidth
 
 ### Testing Strategy
 
@@ -166,6 +334,37 @@ Exactitude.ServiceBus.Replicator.sln
 5. No message loss during normal operation
 6. Successful failover demonstration
 
+### Implementation Progress
+
+#### Completed Work
+1. **Infrastructure Setup**
+   - Created Terraform configuration for Service Bus namespaces
+   - Added SAS key creation and management
+   - Configured Key Vault for secret storage
+   - Implemented connection string construction
+   - Added proper resource tagging
+   - Added test environment setup
+   - Created validation scripts
+
+2. **Code Changes**
+   - Modified `ServiceCollectionExtensions.cs` to use SAS authentication
+   - Updated configuration to use direct connection strings
+   - Removed Azure AD authentication dependencies
+   - Added test message sender
+   - Implemented validation procedures
+
+#### Next Steps
+1. **Infrastructure Deployment**
+   - Deploy Terraform configuration
+   - Verify resource creation
+   - Test Key Vault access
+
+2. **Application Testing**
+   - Run the application
+   - Test message replication
+   - Verify SAS authentication
+   - Monitor performance
+
 ---
 
 ## Technical Requirements Document (TRD)
@@ -238,3 +437,61 @@ Exactitude.ServiceBus.Replicator.sln
 - All connection strings stored in Azure Key Vault
 - Key Vault accessed via Managed Identity using `DefaultAzureCredential`
 - No secrets in plain-text files
+
+# Azure Service Bus Replicator - Product Requirements Document (PRD)
+
+## Infrastructure Management Requirements
+
+### Infrastructure as Code Policy
+
+1. All infrastructure changes MUST be implemented through Terraform:
+   - Service Bus namespaces and their configurations
+   - Topics and subscriptions
+   - Key Vault resources and access policies
+   - Any other Azure resources used by the replicator
+
+2. Manual infrastructure changes are strictly prohibited:
+   - No direct modifications through Azure Portal
+   - No Azure CLI or PowerShell commands for infrastructure changes
+   - No REST API calls to modify infrastructure
+
+3. Change Management:
+   - Infrastructure changes must follow the standard PR review process
+   - Changes must be tested in a development environment first
+   - Changes must be documented in the PR description
+   - Terraform plan output must be included in the PR
+
+4. Compliance:
+   - Regular audits will be performed to ensure compliance
+   - Any unauthorized manual changes will be reverted
+   - Teams must coordinate infrastructure changes through the proper channels
+
+### Authentication Requirements
+
+The service employs a hybrid authentication model:
+
+1. Management Operations (Topic/Subscription Management):
+   - Uses Azure AD authentication
+   - Requires the Azure.Identity library
+   - API must have a Managed Identity with the "Azure Service Bus Data Owner" role
+   - No SAS tokens used for management operations
+
+2. Message Operations (Send/Receive):
+   - Uses SAS authentication with connection strings
+   - Connection strings stored in Azure Key Vault
+   - Created and managed through Terraform
+   - Requires SAS authentication to be enabled on namespaces
+
+3. Service Bus Namespace Configuration:
+   - Required Terraform setting: `local_auth_enabled = true`
+   - Appears in Azure as: `disableLocalAuth = false`
+   - Both settings mean: SAS authentication is enabled
+   - Azure AD authentication always enabled by default
+
+4. Security Best Practices:
+   - Use least-privilege access principles
+   - Regular rotation of SAS keys (automated through Terraform)
+   - Proper secret management in Key Vault
+   - Audit logging enabled for all operations
+
+### Key Vault Requirements

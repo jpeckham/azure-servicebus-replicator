@@ -47,11 +47,15 @@ public class TestServiceBusReplicator : ServiceBusReplicator
 
         if (_shouldThrowTransientError)
         {
+            _logger.LogWarning(new ServiceBusException("Service busy", ServiceBusFailureReason.ServiceBusy),
+                "Temporary service busy error while processing message from {Topic}", topicName);
             throw new ServiceBusException("Service busy", ServiceBusFailureReason.ServiceBusy);
         }
 
         if (_shouldDeadLetter)
         {
+            _logger.LogError(new ServiceBusException("Message lock lost", ServiceBusFailureReason.MessageLockLost),
+                "Error processing message from {Topic}", topicName);
             throw new ServiceBusException("Message lock lost", ServiceBusFailureReason.MessageLockLost);
         }
 

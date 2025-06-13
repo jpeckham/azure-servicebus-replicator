@@ -10,7 +10,7 @@ namespace Exactitude.ServiceBus.Replicator.Tests;
 [TestClass]
 public class ConfigurationTests
 {
-    private IConfiguration CreateTestConfiguration(Dictionary<string, string> initialData)
+    private IConfiguration CreateTestConfiguration(Dictionary<string, string?> initialData)
     {
         return new ConfigurationBuilder()
             .AddInMemoryCollection(initialData)
@@ -21,10 +21,11 @@ public class ConfigurationTests
     public void Configuration_BindsCorrectly()
     {
         // Arrange
-        var configData = new Dictionary<string, string>
+        var configData = new Dictionary<string, string?>
         {
-            {"AzureServiceBus:ConnectionString:Key", "test-connection-string"},
-            {"AzureServiceBus:ConnectionString2:Key", "test-connection-string-2"},
+            {"AzureServiceBus:UniqueId", "test-unique-id"},
+            {"AzureServiceBus:ConnectionString:Key", "test-conn1"},
+            {"AzureServiceBus:ConnectionString2:Key", "test-conn2"},
             {"Replication:SubscriptionName", "test-subscription"},
             {"Replication:DefaultTTLMinutes", "15"},
             {"AzureKeyVault:VaultUri", "https://test-vault.vault.azure.net/"}
@@ -37,8 +38,9 @@ public class ConfigurationTests
 
         // Assert
         Assert.IsNotNull(config);
-        Assert.AreEqual("test-connection-string", config.AzureServiceBus.ConnectionString.Key);
-        Assert.AreEqual("test-connection-string-2", config.AzureServiceBus.ConnectionString2.Key);
+        Assert.AreEqual("test-unique-id", config.AzureServiceBus.UniqueId);
+        Assert.AreEqual("test-conn1", config.AzureServiceBus.ConnectionString.Key);
+        Assert.AreEqual("test-conn2", config.AzureServiceBus.ConnectionString2.Key);
         Assert.AreEqual("test-subscription", config.Replication.SubscriptionName);
         Assert.AreEqual(15, config.Replication.DefaultTTLMinutes);
         Assert.AreEqual("https://test-vault.vault.azure.net/", config.AzureKeyVault.VaultUri);
@@ -48,14 +50,15 @@ public class ConfigurationTests
     public void Configuration_DefaultValues_AreCorrect()
     {
         // Arrange
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ServiceBus:AzureKeyVault:VaultUri"] = "https://test-vault.vault.azure.net/",
-                ["ServiceBus:AzureServiceBus:ConnectionString:Key"] = "source-connection",
-                ["ServiceBus:AzureServiceBus:ConnectionString2:Key"] = "target-connection"
-            })
-            .Build();
+        var configData = new Dictionary<string, string?>
+        {
+            {"ServiceBus:AzureKeyVault:VaultUri", "https://test-vault.vault.azure.net/"},
+            {"ServiceBus:AzureServiceBus:UniqueId", "test-unique-id"},
+            {"ServiceBus:AzureServiceBus:ConnectionString:Key", "test-conn1"},
+            {"ServiceBus:AzureServiceBus:ConnectionString2:Key", "test-conn2"}
+        };
+
+        var config = CreateTestConfiguration(configData);
 
         var services = new ServiceCollection()
             .Configure<ServiceBusReplicatorConfig>(config.GetSection("ServiceBus"))
@@ -67,17 +70,18 @@ public class ConfigurationTests
         // Assert
         Assert.IsNotNull(options.Value);
         Assert.AreEqual("https://test-vault.vault.azure.net/", options.Value.AzureKeyVault.VaultUri);
-        Assert.AreEqual("source-connection", options.Value.AzureServiceBus.ConnectionString.Key);
-        Assert.AreEqual("target-connection", options.Value.AzureServiceBus.ConnectionString2.Key);
-        Assert.AreEqual(10, options.Value.Replication.DefaultTTLMinutes);
-        Assert.AreEqual("replicationapi", options.Value.Replication.SubscriptionName);
+        Assert.AreEqual("test-unique-id", options.Value.AzureServiceBus.UniqueId);
+        Assert.AreEqual("test-conn1", options.Value.AzureServiceBus.ConnectionString.Key);
+        Assert.AreEqual("test-conn2", options.Value.AzureServiceBus.ConnectionString2.Key);
+        Assert.AreEqual(10, options.Value.Replication.DefaultTTLMinutes); // Default value
+        Assert.AreEqual("replicationapi", options.Value.Replication.SubscriptionName); // Default value
     }
 
     [TestMethod]
     public void Configuration_InvalidTTL_ThrowsException()
     {
         // Arrange
-        var configData = new Dictionary<string, string>
+        var configData = new Dictionary<string, string?>
         {
             {"Replication:DefaultTTLMinutes", "-1"}
         };
@@ -86,6 +90,7 @@ public class ConfigurationTests
 
         // Act & Assert
         var config = configuration.Get<ServiceBusReplicatorConfig>();
+        Assert.IsNotNull(config);
         Assert.ThrowsException<ArgumentOutOfRangeException>(() =>
         {
             if (config.Replication.DefaultTTLMinutes <= 0)
@@ -97,23 +102,25 @@ public class ConfigurationTests
     }
 
     [TestMethod]
-    public void Configuration_MissingKeyVaultUri_ThrowsException()
+    public void Configuration_MissingKeyVaultUri_ReturnsEmptyString()
     {
         // Arrange
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ServiceBus:AzureServiceBus:ConnectionString:Key"] = "source-connection",
-                ["ServiceBus:AzureServiceBus:ConnectionString2:Key"] = "target-connection"
-            })
-            .Build();
+        var configData = new Dictionary<string, string?>
+        {
+            {"ServiceBus:AzureServiceBus:UniqueId", "test-unique-id"}
+        };
+
+        var config = CreateTestConfiguration(configData);
 
         var services = new ServiceCollection()
             .Configure<ServiceBusReplicatorConfig>(config.GetSection("ServiceBus"))
             .BuildServiceProvider();
 
-        // Act & Assert
+        // Act
         var options = services.GetRequiredService<IOptions<ServiceBusReplicatorConfig>>();
+
+        // Assert
+        Assert.IsNotNull(options.Value);
         Assert.AreEqual(string.Empty, options.Value.AzureKeyVault.VaultUri);
     }
-} 
+}

@@ -398,3 +398,11 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# terraform stuff
+**/.terraform/**/*
+
+# Ignore all Terraform state files and backups
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.backup

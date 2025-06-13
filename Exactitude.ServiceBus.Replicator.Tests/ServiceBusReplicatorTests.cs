@@ -185,6 +185,114 @@ public class ServiceBusReplicatorTests
             x => x.StartProcessingAsync(It.IsAny<CancellationToken>()),
             Times.Once);
     }
+
+    [TestMethod]
+    public async Task StartAsync_HandlesMessagingEntityNotFoundError()
+    {
+        // Arrange
+        var topics = new[] { "topic1" }.Select(name => TestHelpers.CreateTopicProperties(name));
+        var asyncPageable = new AsyncPageableMock<TopicProperties>(topics);
+
+        _sourceAdminClientMock
+            .Setup(x => x.GetTopicsAsync(It.IsAny<CancellationToken>()))
+            .Returns(asyncPageable);
+
+        _sourceAdminClientMock
+            .Setup(x => x.SubscriptionExistsAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Response.FromValue(true, Mock.Of<Response>()));
+
+        _sourceAdminClientMock
+            .Setup(x => x.DeleteRuleAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                "$Default",
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new ServiceBusException("Rule not found", ServiceBusFailureReason.MessagingEntityNotFound));
+
+        var processorMock = new Mock<ServiceBusProcessor>();
+        _sourceClientMock
+            .Setup(x => x.CreateProcessor(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ServiceBusProcessorOptions>()))
+            .Returns(processorMock.Object);
+
+        processorMock
+            .Setup(x => x.StartProcessingAsync(It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        // Act & Assert
+        await _replicator.StartAsync();
+
+        // Verify that we tried to create the rule even though the delete failed
+        _sourceAdminClientMock.Verify(
+            x => x.CreateRuleAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.Is<CreateRuleOptions>(o =>
+                    o.Name == "ReplicationFilter" &&
+                    o.Filter.GetType() == typeof(SqlRuleFilter) &&
+                    ((SqlRuleFilter)o.Filter).SqlExpression == "replicated IS NULL"),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [TestMethod]
+    public async Task StartAsync_HandlesMessagingEntityAlreadyExistsError()
+    {
+        // Arrange
+        var topics = new[] { "topic1" }.Select(name => TestHelpers.CreateTopicProperties(name));
+        var asyncPageable = new AsyncPageableMock<TopicProperties>(topics);
+
+        _sourceAdminClientMock
+            .Setup(x => x.GetTopicsAsync(It.IsAny<CancellationToken>()))
+            .Returns(asyncPageable);
+
+        _sourceAdminClientMock
+            .Setup(x => x.SubscriptionExistsAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Response.FromValue(true, Mock.Of<Response>()));
+
+        _sourceAdminClientMock
+            .Setup(x => x.CreateRuleAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<CreateRuleOptions>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new ServiceBusException("Rule already exists", ServiceBusFailureReason.MessagingEntityAlreadyExists));
+
+        var processorMock = new Mock<ServiceBusProcessor>();
+        _sourceClientMock
+            .Setup(x => x.CreateProcessor(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ServiceBusProcessorOptions>()))
+            .Returns(processorMock.Object);
+
+        processorMock
+            .Setup(x => x.StartProcessingAsync(It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        // Act & Assert
+        await _replicator.StartAsync();
+
+        // Verify that we tried to create the rule
+        _sourceAdminClientMock.Verify(
+            x => x.CreateRuleAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.Is<CreateRuleOptions>(o =>
+                    o.Name == "ReplicationFilter" &&
+                    o.Filter.GetType() == typeof(SqlRuleFilter) &&
+                    ((SqlRuleFilter)o.Filter).SqlExpression == "replicated IS NULL"),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
 }
 
 public class AsyncPageableMock<T> : AsyncPageable<T> where T : notnull
@@ -198,6 +306,7 @@ public class AsyncPageableMock<T> : AsyncPageable<T> where T : notnull
 
     public override async IAsyncEnumerable<Page<T>> AsPages(string? continuationToken = null, int? pageSizeHint = null)
     {
-        yield return Azure.Page<T>.FromValues(_items.ToList(), null, Mock.Of<Response>());
+        var page = Page<T>.FromValues(_items.ToArray(), continuationToken, Mock.Of<Response>());
+        yield return page;
     }
 } 

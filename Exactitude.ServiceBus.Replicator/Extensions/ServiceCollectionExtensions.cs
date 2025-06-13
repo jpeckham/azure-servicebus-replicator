@@ -1,4 +1,3 @@
-using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using Microsoft.Extensions.Configuration;
@@ -6,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Exactitude.ServiceBus.Replicator.Models;
 using Exactitude.ServiceBus.Replicator.Services;
+using Azure.Identity;
 
 namespace Exactitude.ServiceBus.Replicator.Extensions;
 
@@ -24,62 +24,62 @@ public static class ServiceCollectionExtensions
         var config = configuration.Get<ServiceBusReplicatorConfig>()
             ?? throw new InvalidOperationException("Failed to bind ServiceBusReplicatorConfig from configuration");
 
-        string sourceConnectionString;
-        string targetConnectionString;
+        // Get the SAS connection string values from configuration (populated from Key Vault)
+        var connectionStringKey = config.AzureServiceBus?.ConnectionString?.Key
+            ?? throw new InvalidOperationException("AzureServiceBus:ConnectionString:Key is not configured");
+        var connectionString2Key = config.AzureServiceBus?.ConnectionString2?.Key
+            ?? throw new InvalidOperationException("AzureServiceBus:ConnectionString2:Key is not configured");
 
-        // Check if we're in a test environment
-        if (environment?.IsEnvironment("Testing") ?? false)
+        // Get the actual connection strings from configuration, populated through Key Vault
+        var connectionString = configuration[connectionStringKey]
+            ?? throw new InvalidOperationException($"Connection string for key '{connectionStringKey}' not found");
+        var connectionString2 = configuration[connectionString2Key]
+            ?? throw new InvalidOperationException($"Connection string for key '{connectionString2Key}' not found");
+
+        // Configure client options for messaging operations
+        var clientOptions = new ServiceBusClientOptions
         {
-            // In test environment, use the mock connection strings
-            sourceConnectionString = MockConnectionString;
-            targetConnectionString = MockConnectionString2;
-        }
-        else if (!string.IsNullOrEmpty(config.AzureServiceBus.ConnectionString.Value) &&
-                 !string.IsNullOrEmpty(config.AzureServiceBus.ConnectionString2.Value))
+            TransportType = ServiceBusTransportType.AmqpWebSockets
+        };
+
+        // Extract the namespace from the connection string for the admin client
+        var namespaceUri = GetNamespaceFromConnectionString(connectionString);
+        if (string.IsNullOrEmpty(namespaceUri))
         {
-            // Use direct connection strings if provided
-            sourceConnectionString = config.AzureServiceBus.ConnectionString.Value;
-            targetConnectionString = config.AzureServiceBus.ConnectionString2.Value;
-
-            // Validate connection strings
-            if (string.IsNullOrEmpty(sourceConnectionString))
-            {
-                throw new InvalidOperationException("Source connection string is required");
-            }
-            if (string.IsNullOrEmpty(targetConnectionString))
-            {
-                throw new InvalidOperationException("Target connection string is required");
-            }
-        }
-        else
-        {
-            // Get connection strings from Key Vault
-            var credential = new DefaultAzureCredential();
-            var keyVaultUri = new Uri(config.AzureKeyVault.VaultUri);
-            var secretClient = new Azure.Security.KeyVault.Secrets.SecretClient(keyVaultUri, credential);
-
-            sourceConnectionString = secretClient.GetSecret(config.AzureServiceBus.ConnectionString.Key).Value.Value;
-            targetConnectionString = secretClient.GetSecret(config.AzureServiceBus.ConnectionString2.Key).Value.Value;
-
-            // Validate connection strings
-            if (string.IsNullOrEmpty(sourceConnectionString))
-            {
-                throw new InvalidOperationException($"Failed to get source connection string from Key Vault with key: {config.AzureServiceBus.ConnectionString.Key}");
-            }
-            if (string.IsNullOrEmpty(targetConnectionString))
-            {
-                throw new InvalidOperationException($"Failed to get target connection string from Key Vault with key: {config.AzureServiceBus.ConnectionString2.Key}");
-            }
+            throw new InvalidOperationException("Could not extract namespace from connection string");
         }
 
-        // Register Service Bus clients
-        services.AddSingleton(new ServiceBusClient(sourceConnectionString));
-        services.AddSingleton(new ServiceBusClient(targetConnectionString));
-        services.AddSingleton(new ServiceBusAdministrationClient(sourceConnectionString));
+        // Create Service Bus clients with the appropriate authentication:
+        // 1. Message operation clients with SAS auth (using connection strings)
+        services.AddSingleton(sp => new ServiceBusClient(connectionString, clientOptions));   // Source
+        services.AddSingleton(sp => new ServiceBusClient(connectionString2, clientOptions));  // Target
 
-        // Register the replicator service
-        services.AddSingleton<ServiceBusReplicator>();
+        // 2. Admin client with Azure AD auth (using DefaultAzureCredential)
+        services.AddSingleton(new ServiceBusAdministrationClient(
+            namespaceUri,
+            new DefaultAzureCredential()));
+
+        // Add the replicator service
+        services.AddTransient<ServiceBusReplicator>();
 
         return services;
     }
-} 
+
+    /// <summary>
+    /// Extracts the namespace URI from a Service Bus connection string
+    /// </summary>
+    private static string GetNamespaceFromConnectionString(string connectionString)
+    {
+        var parts = connectionString.Split(';');
+        foreach (var part in parts)
+        {
+            if (part.StartsWith("Endpoint=", StringComparison.OrdinalIgnoreCase))
+            {
+                var endpoint = part.Split('=')[1];
+                // Remove sb:// prefix if present
+                return endpoint.Replace("sb://", string.Empty).TrimEnd('/');
+            }
+        }
+        return string.Empty;
+    }
+}

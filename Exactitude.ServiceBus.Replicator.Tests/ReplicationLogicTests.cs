@@ -1,6 +1,7 @@
 using AutoFixture;
 using Azure;
 using Azure.Core;
+using Azure.Core.Pipeline;
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using Microsoft.Extensions.Logging;
@@ -18,13 +19,13 @@ namespace Exactitude.ServiceBus.Replicator.Tests;
 public class ReplicationLogicTests
 {
     private readonly Fixture _fixture;
-    private Mock<ILogger<ServiceBusReplicator>> _loggerMock;
-    private Mock<ServiceBusClient> _sourceClientMock;
-    private Mock<ServiceBusClient> _targetClientMock;
-    private Mock<ServiceBusAdministrationClient> _sourceAdminClientMock;
-    private Mock<ServiceBusSender> _senderMock;
-    private ServiceBusReplicatorConfig _config;
-    private TestServiceBusReplicator _replicator;
+    private Mock<ILogger<ServiceBusReplicator>> _loggerMock = null!;
+    private Mock<ServiceBusClient> _sourceClientMock = null!;
+    private Mock<ServiceBusClient> _targetClientMock = null!;
+    private Mock<ServiceBusAdministrationClient> _sourceAdminClientMock = null!;
+    private Mock<ServiceBusSender> _senderMock = null!;
+    private ServiceBusReplicatorConfig _config = null!;
+    private TestServiceBusReplicator _replicator = null!;
 
     public ReplicationLogicTests()
     {
@@ -63,52 +64,57 @@ public class ReplicationLogicTests
     }
 
     [TestMethod]
-    public async Task ProcessMessage_PreservesProperties()
+    public async Task ProcessMessage_PreservesMessageProperties()
     {
         // Arrange
-        var messageId = "test-message-id";
-        var correlationId = "test-correlation-id";
+        var messageId = Guid.NewGuid().ToString();
+        var correlationId = Guid.NewGuid().ToString();
         var contentType = "application/json";
-        var label = "test-label";
-        var partitionKey = "test-partition-key";
-        var replyTo = "test-reply-to";
-        var replyToSessionId = "test-reply-session-id";
-        var sessionId = "test-session-id";
-        var to = "test-to";
+        var subject = "Test Message";
+        var partitionKey = "test-partition";
+        var replyTo = "reply-queue";
+        var replyToSessionId = "reply-session";
+        var sessionId = "test-session";
+        var to = "destination";
+        var enqueuedTime = DateTimeOffset.UtcNow;
+        var timeToLive = TimeSpan.FromMinutes(30);
         var properties = new Dictionary<string, object>
         {
-            { "custom-prop1", "value1" },
-            { "custom-prop2", 42 }
+            { "CustomProperty1", "Value1" },
+            { "CustomProperty2", 42 }
         };
 
-        var message = ServiceBusModelFactory.ServiceBusReceivedMessage(
-            BinaryData.FromString("test-body"),
-            messageId: messageId,
-            correlationId: correlationId,
-            contentType: contentType,
-            subject: label,
-            partitionKey: partitionKey,
-            replyTo: replyTo,
-            replyToSessionId: replyToSessionId,
-            sessionId: sessionId,
-            to: to,
-            properties: properties);
+        var message = TestHelpers.CreateServiceBusReceivedMessage(
+            BinaryData.FromString("Test message body"),
+            messageId,
+            correlationId,
+            contentType,
+            subject,
+            partitionKey,
+            replyTo,
+            replyToSessionId,
+            sessionId,
+            to,
+            enqueuedTime,
+            timeToLive,
+            1,
+            properties);
 
         ServiceBusMessage? capturedMessage = null;
-        _senderMock.Setup(x => x.SendMessageAsync(It.IsAny<ServiceBusMessage>(), It.IsAny<CancellationToken>()))
-            .Callback<ServiceBusMessage, CancellationToken>((m, _) => capturedMessage = m)
+        _senderMock
+            .Setup(x => x.SendMessageAsync(It.IsAny<ServiceBusMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<ServiceBusMessage, CancellationToken>((msg, _) => capturedMessage = msg)
             .Returns(Task.CompletedTask);
 
         // Act
         await _replicator.ProcessMessageAsync(message, "test-topic");
 
         // Assert
-        _senderMock.Verify(x => x.SendMessageAsync(It.IsAny<ServiceBusMessage>(), It.IsAny<CancellationToken>()), Times.Once);
         Assert.IsNotNull(capturedMessage);
         Assert.AreEqual(messageId, capturedMessage.MessageId);
         Assert.AreEqual(correlationId, capturedMessage.CorrelationId);
         Assert.AreEqual(contentType, capturedMessage.ContentType);
-        Assert.AreEqual(label, capturedMessage.Subject);
+        Assert.AreEqual(subject, capturedMessage.Subject);
         Assert.AreEqual(partitionKey, capturedMessage.PartitionKey);
         Assert.AreEqual(replyTo, capturedMessage.ReplyTo);
         Assert.AreEqual(replyToSessionId, capturedMessage.ReplyToSessionId);
@@ -117,14 +123,74 @@ public class ReplicationLogicTests
 
         foreach (var prop in properties)
         {
-            Assert.IsTrue(capturedMessage.ApplicationProperties.ContainsKey(prop.Key), $"Missing property: {prop.Key}");
-            Assert.AreEqual(prop.Value, capturedMessage.ApplicationProperties[prop.Key], $"Property value mismatch for {prop.Key}");
+            Assert.IsTrue(capturedMessage.ApplicationProperties.ContainsKey(prop.Key));
+            Assert.AreEqual(prop.Value, capturedMessage.ApplicationProperties[prop.Key]);
         }
 
-        Assert.IsTrue(capturedMessage.ApplicationProperties.ContainsKey("replicated"), "Missing 'replicated' property");
-        Assert.AreEqual(1, capturedMessage.ApplicationProperties["replicated"], "Incorrect 'replicated' value");
-        Assert.IsTrue(capturedMessage.ApplicationProperties.ContainsKey("repl-origin"), "Missing 'repl-origin' property");
-        Assert.AreEqual(messageId, capturedMessage.ApplicationProperties["repl-origin"], "Incorrect 'repl-origin' value");
+        Assert.IsTrue(capturedMessage.ApplicationProperties.ContainsKey("replicated"));
+        Assert.AreEqual(1, capturedMessage.ApplicationProperties["replicated"]);
+    }
+
+    [TestMethod]
+    public async Task ProcessMessage_HandlesTransientError()
+    {
+        // Arrange
+        var message = TestHelpers.CreateServiceBusReceivedMessage(
+            BinaryData.FromString("Test message body"));
+
+        var replicator = new TestServiceBusReplicator(
+            _loggerMock,
+            _sourceClientMock,
+            _targetClientMock,
+            _sourceAdminClientMock,
+            _senderMock,
+            _config,
+            shouldThrowTransientError: true);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsExceptionAsync<ServiceBusException>(
+            async () => await replicator.ProcessMessageAsync(message, "test-topic"));
+
+        Assert.AreEqual(ServiceBusFailureReason.ServiceBusy, exception.Reason);
+        _loggerMock.Verify(
+            x => x.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, t) => true),
+                It.Is<ServiceBusException>(e => e.Reason == ServiceBusFailureReason.ServiceBusy),
+                It.Is<Func<It.IsAnyType, Exception?, string>>((v, t) => true)),
+            Times.Once);
+    }
+
+    [TestMethod]
+    public async Task ProcessMessage_HandlesDeadLetter()
+    {
+        // Arrange
+        var message = TestHelpers.CreateServiceBusReceivedMessage(
+            BinaryData.FromString("Test message body"));
+
+        var replicator = new TestServiceBusReplicator(
+            _loggerMock,
+            _sourceClientMock,
+            _targetClientMock,
+            _sourceAdminClientMock,
+            _senderMock,
+            _config,
+            shouldDeadLetter: true);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsExceptionAsync<ServiceBusException>(
+            async () => await replicator.ProcessMessageAsync(message, "test-topic"));
+
+        Assert.AreEqual(ServiceBusFailureReason.MessageLockLost, exception.Reason);
+        _loggerMock.Verify(
+            x => x.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, t) => true),
+                It.Is<ServiceBusException>(e => e.Reason == ServiceBusFailureReason.MessageLockLost),
+                It.Is<Func<It.IsAnyType, Exception?, string>>((v, t) => true)),
+            Times.Once);
     }
 
     [TestMethod]

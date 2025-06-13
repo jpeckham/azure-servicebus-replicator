@@ -1,5 +1,6 @@
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
+using Azure.Identity;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Exactitude.ServiceBus.Replicator.Models;
@@ -19,26 +20,34 @@ public class ServiceBusReplicator : IAsyncDisposable
     public ServiceBusReplicator(
         ILogger<ServiceBusReplicator> logger,
         IOptions<ServiceBusReplicatorConfig> config,
-        ServiceBusClient sourceClient,
-        ServiceBusClient targetClient,
+        IEnumerable<ServiceBusClient> clientList,
         ServiceBusAdministrationClient sourceAdminClient)
     {
         _logger = logger;
-        _sourceClient = sourceClient;
-        _targetClient = targetClient;
-        _sourceAdminClient = sourceAdminClient;
         _config = config.Value;
+        
+        // Message operation clients (using SAS auth)
+        _sourceClient = clientList.ToArray()[0];
+        _targetClient = clientList.ToArray()[1];
+        
+        // Admin client (using Azure AD auth)
+        _sourceAdminClient = sourceAdminClient;
+
         _processors = new List<ServiceBusProcessor>();
         _topicProcessors = new Dictionary<string, ServiceBusProcessor>();
+        
+        _logger.LogInformation("ServiceBusReplicator initialized with hybrid auth: Azure AD for admin, SAS for messaging");
     }
 
     public virtual async Task StartAsync(CancellationToken cancellationToken = default)
     {
         try
-        {
+        {            
+            _logger.LogInformation("Starting service bus replication");
             var topics = await GetSourceTopicsAsync(cancellationToken);
             foreach (var topic in topics)
             {
+                _logger.LogInformation("Processing topic: {Topic}", topic);
                 await EnsureSubscriptionExistsAsync(topic, cancellationToken);
                 await StartProcessingTopicAsync(topic, cancellationToken);
             }
@@ -52,12 +61,22 @@ public class ServiceBusReplicator : IAsyncDisposable
 
     protected virtual async Task<IEnumerable<string>> GetSourceTopicsAsync(CancellationToken cancellationToken)
     {
-        var topics = new List<string>();
-        await foreach (var topic in _sourceAdminClient.GetTopicsAsync(cancellationToken))
+        try
         {
-            topics.Add(topic.Name);
+            var topicNames = new List<string>();
+            var topicProperties = _sourceAdminClient.GetTopicsAsync(cancellationToken);
+            await foreach (var topicProperty in topicProperties)
+            {
+                topicNames.Add(topicProperty.Name);
+            }
+            _logger.LogInformation("Successfully retrieved {Count} topics from source namespace", topicNames.Count);
+            return topicNames;
         }
-        return topics;
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to retrieve topics from source namespace");
+            throw;
+        }
     }
 
     protected virtual async Task EnsureSubscriptionExistsAsync(string topicName, CancellationToken cancellationToken)
@@ -73,8 +92,10 @@ public class ServiceBusReplicator : IAsyncDisposable
                 DefaultMessageTimeToLive = TimeSpan.FromMinutes(_config.Replication.DefaultTTLMinutes)
             };
 
-            var rule = new CreateRuleOptions("ReplicationFilter", new SqlRuleFilter("replicated IS NULL"));
-            rule.Action = new SqlRuleAction("SET replicated = 1");
+            var rule = new CreateRuleOptions("ReplicationFilter", new SqlRuleFilter("replicated IS NULL"))
+            {
+                Action = new SqlRuleAction("SET replicated = 1")
+            };
 
             await _sourceAdminClient.CreateSubscriptionAsync(options, rule, cancellationToken);
             _logger.LogInformation("Created subscription {Subscription} for topic {Topic}", subscriptionName, topicName);
@@ -93,8 +114,10 @@ public class ServiceBusReplicator : IAsyncDisposable
 
             try
             {
-                var ruleOptions = new CreateRuleOptions("ReplicationFilter", new SqlRuleFilter("replicated IS NULL"));
-                ruleOptions.Action = new SqlRuleAction("SET replicated = 1");
+                var ruleOptions = new CreateRuleOptions("ReplicationFilter", new SqlRuleFilter("replicated IS NULL"))
+                {
+                    Action = new SqlRuleAction("SET replicated = 1")
+                };
                 await _sourceAdminClient.CreateRuleAsync(topicName, subscriptionName, ruleOptions, cancellationToken);
             }
             catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessagingEntityAlreadyExists)
@@ -106,41 +129,30 @@ public class ServiceBusReplicator : IAsyncDisposable
 
     private async Task StartProcessingTopicAsync(string topicName, CancellationToken cancellationToken)
     {
-        if (_topicProcessors.ContainsKey(topicName))
-        {
-            _logger.LogInformation("Processor already exists for topic {Topic}", topicName);
-            return;
-        }
-
-        try
-        {
-            var subscriptionName = _config.Replication.SubscriptionName;
-            var processor = _sourceClient.CreateProcessor(topicName, subscriptionName, new ServiceBusProcessorOptions
+        var processor = _sourceClient.CreateProcessor(
+            topicName,
+            _config.Replication.SubscriptionName,
+            new ServiceBusProcessorOptions
             {
                 MaxConcurrentCalls = 1,
-                AutoCompleteMessages = false
+                AutoCompleteMessages = true
             });
 
-            processor.ProcessMessageAsync += ProcessMessageEventHandler;
-            processor.ProcessErrorAsync += ProcessErrorHandler;
+        processor.ProcessMessageAsync += ProcessMessageEventHandler;
+        processor.ProcessErrorAsync += ProcessErrorHandler;
 
-            await processor.StartProcessingAsync(cancellationToken);
-            _processors.Add(processor);
-            _topicProcessors[topicName] = processor;
-            _logger.LogInformation("Started processing messages for topic {Topic}", topicName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error starting processing for topic {Topic}", topicName);
-            throw;
-        }
+        _topicProcessors[topicName] = processor;
+        _processors.Add(processor);
+
+        await processor.StartProcessingAsync(cancellationToken);
+        _logger.LogInformation("Started processing messages for topic {Topic}", topicName);
     }
 
     private async Task ProcessMessageEventHandler(ProcessMessageEventArgs args)
     {
         try
         {
-            await ProcessMessageHandler(args.Message, args.EntityPath);
+            await ProcessMessageHandler(args.Message, GetTopicNameFromEntityPath(args.EntityPath));
             await args.CompleteMessageAsync(args.Message);
         }
         catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.ServiceBusy)
@@ -160,45 +172,57 @@ public class ServiceBusReplicator : IAsyncDisposable
         _logger.LogError(args.Exception, "Error processing messages from {Topic}: {Error}", args.EntityPath, args.Exception.Message);
         return Task.CompletedTask;
     }
+    private string GetTopicNameFromEntityPath(string entityPath)
+    {
+        // Entity path format: "topic-name/subscriptions/subscription-name"
+        return entityPath.Split('/')[0];
+    }
 
     protected virtual async Task ProcessMessageHandler(ServiceBusReceivedMessage message, string topicName)
     {
+        var remainingTtl = GetRemainingTTL(message);
         ServiceBusSender? sender = null;
+
         try
         {
             sender = _targetClient.CreateSender(topicName);
-
-            var newMessage = new ServiceBusMessage(message)
-            {
-                TimeToLive = GetRemainingTTL(message)
-            };
-
-            newMessage.ApplicationProperties.Add("replicated", 1);
-            newMessage.ApplicationProperties.Add("repl-origin", message.MessageId);
-            newMessage.ApplicationProperties.Add("repl-enqueue-time", message.EnqueuedTime);
-            newMessage.ApplicationProperties.Add("repl-sequence", message.SequenceNumber);
-
-            await sender.SendMessageAsync(newMessage);
+            var messageClone = new ServiceBusMessage(message);
+            messageClone.TimeToLive = remainingTtl;
 
             _logger.LogInformation(
-                "Replicated message {MessageId} from topic {SourceTopic} to {TargetTopic}",
-                message.MessageId,
+                "Forwarding message {MessageId} from topic {Topic} with TTL {TTL}",
+                message.MessageId ?? "(no id)",
                 topicName,
+                remainingTtl);
+
+            await sender.SendMessageAsync(messageClone);
+
+            _logger.LogDebug(
+                "Successfully forwarded message {MessageId} to topic {Topic}",
+                message.MessageId ?? "(no id)",
                 topicName);
         }
         catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.ServiceBusy)
         {
             _logger.LogWarning(ex,
-                "Temporary error processing message {MessageId} from topic {Topic}",
-                message.MessageId,
+                "Temporary error processing message {MessageId} from topic {Topic} - will retry",
+                message.MessageId ?? "(no id)",
                 topicName);
             throw; // Rethrow to allow retry
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogError(ex,
+                "Authentication failed while processing message {MessageId} from topic {Topic}. Verify SAS connection string is valid.",
+                message.MessageId ?? "(no id)",
+                topicName);
+            throw; // Critical auth error, don't retry
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "Error processing message {MessageId} from topic {Topic}",
-                message.MessageId,
+                message.MessageId ?? "(no id)",
                 topicName);
             throw;
         }
@@ -213,33 +237,17 @@ public class ServiceBusReplicator : IAsyncDisposable
 
     protected virtual TimeSpan GetRemainingTTL(ServiceBusReceivedMessage message)
     {
-        var originalTTL = message.TimeToLive;
-        if (originalTTL == TimeSpan.MaxValue)
-        {
-            return TimeSpan.FromMinutes(_config.Replication.DefaultTTLMinutes);
-        }
-
-        var elapsedTime = DateTimeOffset.UtcNow - message.EnqueuedTime;
-        var remainingTTL = originalTTL - elapsedTime;
-
-        // Ensure minimum TTL of 4 minutes
-        if (remainingTTL.TotalMinutes < 4)
-        {
-            return TimeSpan.FromMinutes(4);
-        }
-
-        return remainingTTL;
+        var expiresAt = message.ExpiresAt;
+        var now = DateTimeOffset.UtcNow;
+        var ttl = expiresAt > now ? expiresAt - now : TimeSpan.Zero;
+        return ttl;
     }
 
     public async ValueTask DisposeAsync()
     {
         foreach (var processor in _processors)
         {
-            processor.ProcessMessageAsync -= ProcessMessageEventHandler;
-            processor.ProcessErrorAsync -= ProcessErrorHandler;
             await processor.DisposeAsync();
         }
-        _processors.Clear();
-        _topicProcessors.Clear();
     }
-} 
+}
